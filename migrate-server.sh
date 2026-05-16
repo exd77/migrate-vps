@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
 #  🚀 Server Migration Tool
-#  Automate directory transfer between servers with integrity
-#  verification and dependency installation.
+#  Automate file/directory transfer between servers with
+#  integrity verification and dependency installation.
 # ═══════════════════════════════════════════════════════════════
 set -uo pipefail
 
@@ -40,7 +40,7 @@ EXCLUDE_PATTERNS=("node_modules" ".git" "__pycache__" "*.pyc" ".venv")
 SKIP_DEPS=false
 SKIP_VERIFY=false
 DRY_RUN=false
-DIRS_TO_TRANSFER=()
+ITEMS_TO_TRANSFER=()
 
 # ─── Helper Functions ─────────────────────────────────────────
 print_banner() {
@@ -59,7 +59,7 @@ print_banner() {
     echo ""
     echo -e " ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e " ${WHITE}${BOLD} 🛠️ Tool:${NC} ${YELLOW}Server Migration Automation${NC}"
-    echo -e " ${WHITE}${BOLD} 📌 Features:${NC} ${GREEN}Rsync Transfer + MD5 Verify + Auto Install Deps${NC}"
+    echo -e " ${WHITE}${BOLD} 📌 Features:${NC} ${GREEN}Files + Directories | MD5 Verify | Auto Install Deps${NC}"
     echo -e " ${WHITE}${BOLD} 🔐 Security:${NC} ${BLUE}SSH Key Auth + StrictHostKey Bypass${NC}"
     echo -e " ${CYAN} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -75,13 +75,26 @@ separator() {
     echo -e "${DIM}  ──────────────────────────────────────────────────${NC}"
 }
 
+# Returns "directory" or "file" based on the path type.
+item_kind() {
+    local p="$1"
+    if [[ -d "$p" ]]; then
+        echo "directory"
+    elif [[ -f "$p" ]]; then
+        echo "file"
+    else
+        echo "missing"
+    fi
+}
+
 # ─── Usage ────────────────────────────────────────────────────
 usage() {
     echo -e "${BOLD}Usage:${NC}"
     echo "  $0 [OPTIONS]"
     echo ""
     echo -e "${BOLD}Options:${NC}"
-    echo "  -d, --dir DIR          Directory to transfer (can be used multiple times)"
+    echo "  -p, --path PATH        File or directory to transfer (can be used multiple times)"
+    echo "  -d, --dir PATH         Alias for --path (kept for backward compatibility)"
     echo "  -u, --user USER        Destination server username"
     echo "  -i, --ip IP            Destination server IP address"
     echo "  -k, --key FILE         SSH private key file path"
@@ -96,10 +109,11 @@ usage() {
     echo "  # Interactive mode (will prompt for everything):"
     echo "  $0"
     echo ""
-    echo "  # Full command-line mode:"
-    echo "  $0 -d /root/bot -d /root/discord -u ubuntu -i 13.236.147.204 -k /root/key.pem"
+    echo "  # Transfer mixed files and directories:"
+    echo "  $0 -p /root/bot -p /root/backup.tar.gz -p /root/setup.sh \\"
+    echo "     -u ubuntu -i 13.236.147.204 -k /root/key.pem"
     echo ""
-    echo "  # Mix: specify server, prompt for directories:"
+    echo "  # Mix: specify server, prompt for paths:"
     echo "  $0 -u ubuntu -i 13.236.147.204 -k /root/key.pem"
     exit 0
 }
@@ -108,7 +122,8 @@ usage() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            -d|--dir)       DIRS_TO_TRANSFER+=("$2"); shift 2;;
+            -p|--path)      ITEMS_TO_TRANSFER+=("$2"); shift 2;;
+            -d|--dir)       ITEMS_TO_TRANSFER+=("$2"); shift 2;;
             -u|--user)      DEST_USER="$2"; shift 2;;
             -i|--ip)        DEST_IP="$2"; shift 2;;
             -k|--key)       SSH_KEY="$2"; shift 2;;
@@ -155,61 +170,73 @@ prompt_server_details() {
     fi
 }
 
-prompt_directories() {
-    if [[ ${#DIRS_TO_TRANSFER[@]} -gt 0 ]]; then
-        echo -e "\n${BOLD}📁 Directories to Transfer${NC}"
+prompt_items() {
+    if [[ ${#ITEMS_TO_TRANSFER[@]} -gt 0 ]]; then
+        echo -e "\n${BOLD}📁 Items to Transfer${NC}"
         separator
-        for dir in "${DIRS_TO_TRANSFER[@]}"; do
-            if [[ -d "$dir" ]]; then
-                local size
-                size=$(du -sh "$dir" 2>/dev/null | cut -f1)
-                log_success "$dir ($size)"
+        for item in "${ITEMS_TO_TRANSFER[@]}"; do
+            local kind
+            kind=$(item_kind "$item")
+            if [[ "$kind" == "missing" ]]; then
+                log_error "$item — NOT FOUND (skipping)"
             else
-                log_error "$dir — NOT FOUND (skipping)"
+                local size
+                size=$(du -sh "$item" 2>/dev/null | cut -f1)
+                local icon="📂"
+                [[ "$kind" == "file" ]] && icon="📄"
+                log_success "$icon $item ($size)"
             fi
         done
         return
     fi
 
-    echo -e "\n${BOLD}📁 Select Directories to Transfer${NC}"
+    echo -e "\n${BOLD}📁 Select Files/Directories to Transfer${NC}"
     separator
-    echo -e "  ${DIM}Enter directory paths one per line."
+    echo -e "  ${DIM}Enter file or directory paths one per line."
     echo -e "  Press Enter on empty line when done.${NC}"
     echo ""
 
     while true; do
-        read -rp "  📂 Directory path (or Enter to finish): " dir_path
+        read -rp "  📂 Path (or Enter to finish): " item_path
 
         # Empty = done
-        [[ -z "$dir_path" ]] && break
+        [[ -z "$item_path" ]] && break
 
         # Expand ~ if used
-        dir_path="${dir_path/#\~/$HOME}"
+        item_path="${item_path/#\~/$HOME}"
 
         # Validate
-        if [[ ! -d "$dir_path" ]]; then
-            log_error "'$dir_path' does not exist or is not a directory."
+        if [[ ! -e "$item_path" ]]; then
+            log_error "'$item_path' does not exist."
+            continue
+        fi
+
+        if [[ ! -f "$item_path" && ! -d "$item_path" ]]; then
+            log_error "'$item_path' is not a regular file or directory."
             continue
         fi
 
         # Check duplicate
         local dup=false
-        for existing in "${DIRS_TO_TRANSFER[@]+"${DIRS_TO_TRANSFER[@]}"}"; do
-            [[ "$existing" == "$dir_path" ]] && dup=true && break
+        for existing in "${ITEMS_TO_TRANSFER[@]+"${ITEMS_TO_TRANSFER[@]}"}"; do
+            [[ "$existing" == "$item_path" ]] && dup=true && break
         done
         if $dup; then
-            log_warn "Already added: $dir_path"
+            log_warn "Already added: $item_path"
             continue
         fi
 
-        local size
-        size=$(du -sh "$dir_path" 2>/dev/null | cut -f1)
-        DIRS_TO_TRANSFER+=("$dir_path")
-        log_success "Added: $dir_path ($size)"
+        local size kind icon
+        size=$(du -sh "$item_path" 2>/dev/null | cut -f1)
+        kind=$(item_kind "$item_path")
+        icon="📂"
+        [[ "$kind" == "file" ]] && icon="📄"
+        ITEMS_TO_TRANSFER+=("$item_path")
+        log_success "Added: $icon $item_path ($size)"
     done
 
-    if [[ ${#DIRS_TO_TRANSFER[@]} -eq 0 ]]; then
-        log_error "No directories selected. Exiting."
+    if [[ ${#ITEMS_TO_TRANSFER[@]} -eq 0 ]]; then
+        log_error "No items selected. Exiting."
         exit 1
     fi
 }
@@ -241,19 +268,19 @@ validate() {
         log_success "SSH key permissions set (600)"
     fi
 
-    # Validate directories exist
-    local valid_dirs=()
-    for dir in "${DIRS_TO_TRANSFER[@]}"; do
-        if [[ -d "$dir" ]]; then
-            valid_dirs+=("$dir")
+    # Validate items exist (file or dir)
+    local valid_items=()
+    for item in "${ITEMS_TO_TRANSFER[@]}"; do
+        if [[ -d "$item" || -f "$item" ]]; then
+            valid_items+=("$item")
         else
-            log_warn "Skipping non-existent: $dir"
+            log_warn "Skipping non-existent: $item"
         fi
     done
-    DIRS_TO_TRANSFER=("${valid_dirs[@]}")
+    ITEMS_TO_TRANSFER=("${valid_items[@]+"${valid_items[@]}"}")
 
-    if [[ ${#DIRS_TO_TRANSFER[@]} -eq 0 ]]; then
-        log_error "No valid directories to transfer."; ((errors++))
+    if [[ ${#ITEMS_TO_TRANSFER[@]} -eq 0 ]]; then
+        log_error "No valid items to transfer."; ((errors++))
     fi
 
     # Test SSH connection
@@ -284,74 +311,90 @@ build_ssh_opts() {
     echo "$opts"
 }
 
-build_rsync_excludes() {
-    local excludes=""
-    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-        excludes="$excludes --exclude '$pattern'"
-    done
-    echo "$excludes"
-}
-
 remote_exec() {
     local ssh_opts
     ssh_opts=$(build_ssh_opts)
     ssh $ssh_opts "${DEST_USER}@${DEST_IP}" "$1"
 }
 
+# Ensure the destination base directory exists before transferring files into it.
+ensure_remote_base_dir() {
+    remote_exec "mkdir -p '$DEST_BASE_DIR'" 2>/dev/null
+}
+
 # ─── Transfer ─────────────────────────────────────────────────
-transfer_directories() {
+transfer_items() {
     local count=0
-    local total=${#DIRS_TO_TRANSFER[@]}
+    local total=${#ITEMS_TO_TRANSFER[@]}
     local failed=()
     local succeeded=()
 
-    echo -e "\n${BOLD}📤 Transferring ${total} Director${NC}$([ $total -gt 1 ] && echo "ies" || echo "y")"
+    echo -e "\n${BOLD}📤 Transferring ${total} Item$([ $total -gt 1 ] && echo "s")${NC}"
     separator
 
-    for dir in "${DIRS_TO_TRANSFER[@]}"; do
-        ((count++))
-        local dir_name
-        dir_name=$(basename "$dir")
-        local dest_path="${DEST_BASE_DIR}/${dir_name}"
-        local size
-        size=$(du -sh "$dir" 2>/dev/null | cut -f1)
+    ensure_remote_base_dir
 
-        echo -e "\n  ${CYAN}[$count/$total]${NC} ${BOLD}$dir_name${NC} ($size) → $dest_path"
+    for item in "${ITEMS_TO_TRANSFER[@]}"; do
+        ((count++))
+        local item_name kind size dest_path
+        item_name=$(basename "$item")
+        kind=$(item_kind "$item")
+        size=$(du -sh "$item" 2>/dev/null | cut -f1)
+        dest_path="${DEST_BASE_DIR}/${item_name}"
+
+        local icon="📂"
+        [[ "$kind" == "file" ]] && icon="📄"
+        echo -e "\n  ${CYAN}[$count/$total]${NC} ${icon} ${BOLD}$item_name${NC} ($size, $kind) → $dest_path"
 
         if $DRY_RUN; then
-            log_info "[DRY RUN] Would transfer: $dir → $dest_path"
-            succeeded+=("$dir")
+            log_info "[DRY RUN] Would transfer: $item → $dest_path"
+            succeeded+=("$item")
             continue
         fi
 
         local ssh_opts
         ssh_opts=$(build_ssh_opts)
-        local exclude_args=""
-        for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-            exclude_args="$exclude_args --exclude=$pattern"
-        done
 
-        # Run rsync
-        if rsync -avz --progress $exclude_args \
-            -e "ssh $ssh_opts" \
-            "$dir/" "${DEST_USER}@${DEST_IP}:${dest_path}/" 2>&1 | \
-            while IFS= read -r line; do
-                # Show only summary lines, not every file
-                if [[ "$line" == *"sent "* && "$line" == *"bytes"* ]]; then
-                    echo -e "    ${DIM}$line${NC}"
-                fi
-            done; then
-            log_success "$dir_name transferred successfully"
-            succeeded+=("$dir")
+        local rsync_status=0
+        if [[ "$kind" == "directory" ]]; then
+            local exclude_args=""
+            for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+                exclude_args="$exclude_args --exclude=$pattern"
+            done
+            rsync -avz --progress $exclude_args \
+                -e "ssh $ssh_opts" \
+                "$item/" "${DEST_USER}@${DEST_IP}:${dest_path}/" 2>&1 | \
+                while IFS= read -r line; do
+                    if [[ "$line" == *"sent "* && "$line" == *"bytes"* ]]; then
+                        echo -e "    ${DIM}$line${NC}"
+                    fi
+                done
+            rsync_status=${PIPESTATUS[0]}
         else
-            log_error "$dir_name transfer FAILED"
-            failed+=("$dir")
+            # Single file: no excludes, no trailing slashes, dest is full file path.
+            rsync -avz --progress \
+                -e "ssh $ssh_opts" \
+                "$item" "${DEST_USER}@${DEST_IP}:${dest_path}" 2>&1 | \
+                while IFS= read -r line; do
+                    if [[ "$line" == *"sent "* && "$line" == *"bytes"* ]]; then
+                        echo -e "    ${DIM}$line${NC}"
+                    fi
+                done
+            rsync_status=${PIPESTATUS[0]}
+        fi
+
+        if [[ $rsync_status -eq 0 ]]; then
+            log_success "$item_name transferred successfully"
+            succeeded+=("$item")
+        else
+            log_error "$item_name transfer FAILED (rsync exit $rsync_status)"
+            failed+=("$item")
         fi
     done
 
     echo ""
     separator
-    log_success "${#succeeded[@]}/$total directories transferred"
+    log_success "${#succeeded[@]}/$total items transferred"
     if [[ ${#failed[@]} -gt 0 ]]; then
         log_error "${#failed[@]} failed: ${failed[*]}"
         return 1
@@ -365,40 +408,54 @@ verify_integrity() {
         return 0
     fi
 
-    echo -e "\n${BOLD}🔐 Verifying File Integrity (MD5 Checksums)${NC}"
+    echo -e "\n${BOLD}🔐 Verifying Integrity (MD5 Checksums)${NC}"
     separator
 
     local all_ok=true
 
-    for dir in "${DIRS_TO_TRANSFER[@]}"; do
-        local dir_name
-        dir_name=$(basename "$dir")
-        local dest_path="${DEST_BASE_DIR}/${dir_name}"
+    for item in "${ITEMS_TO_TRANSFER[@]}"; do
+        local item_name kind dest_path
+        item_name=$(basename "$item")
+        kind=$(item_kind "$item")
+        dest_path="${DEST_BASE_DIR}/${item_name}"
 
-        echo -ne "  Checking ${BOLD}$dir_name${NC}... "
+        echo -ne "  Checking ${BOLD}$item_name${NC}... "
 
-        # Build find exclude args
+        if [[ "$kind" == "file" ]]; then
+            # Single-file checksum compare.
+            local src_sum dst_sum
+            src_sum=$(md5sum "$item" 2>/dev/null | awk '{print $1}')
+            dst_sum=$(remote_exec "md5sum '$dest_path' 2>/dev/null | awk '{print \$1}'" 2>/dev/null)
+
+            if [[ -z "$src_sum" || -z "$dst_sum" ]]; then
+                echo -e "${RED}❌ Could not read checksum${NC}"
+                all_ok=false
+            elif [[ "$src_sum" == "$dst_sum" ]]; then
+                echo -e "${GREEN}✅ OK${NC} ($src_sum)"
+            else
+                echo -e "${RED}❌ Checksum mismatch${NC}"
+                echo -e "    ${DIM}src: $src_sum${NC}"
+                echo -e "    ${DIM}dst: $dst_sum${NC}"
+                all_ok=false
+            fi
+            continue
+        fi
+
+        # Directory: walk and compare every file's checksum.
         local find_excludes=""
         for pattern in "${EXCLUDE_PATTERNS[@]}"; do
             find_excludes="$find_excludes -not -path '*/$pattern/*'"
         done
 
-        # Generate source checksums
-        local src_checksums
-        src_checksums=$(eval "find '$dir' -type f $find_excludes -exec md5sum {} \;" 2>/dev/null | \
-            awk -v base="$dir" '{gsub(base"/", "", $2); print $1, $2}' | sort -k2)
-
-        # Generate dest checksums
-        local dst_checksums
+        local src_checksums dst_checksums
+        src_checksums=$(eval "find '$item' -type f $find_excludes -exec md5sum {} \;" 2>/dev/null | \
+            awk -v base="$item" '{gsub(base"/", "", $2); print $1, $2}' | sort -k2)
         dst_checksums=$(remote_exec "find '$dest_path' -type f $find_excludes -exec md5sum {} \;" 2>/dev/null | \
             awk -v base="$dest_path" '{gsub(base"/", "", $2); print $1, $2}' | sort -k2)
 
         local src_count
         src_count=$(echo "$src_checksums" | grep -c . 2>/dev/null || echo 0)
-        local dst_count
-        dst_count=$(echo "$dst_checksums" | grep -c . 2>/dev/null || echo 0)
 
-        # Compare
         local diff_result
         diff_result=$(diff <(echo "$src_checksums") <(echo "$dst_checksums") 2>/dev/null)
 
@@ -407,10 +464,6 @@ verify_integrity() {
         else
             local diff_count
             diff_count=$(echo "$diff_result" | grep -cE "^[<>]" 2>/dev/null || echo 0)
-
-            # Check if differences are only runtime files (logs, caches)
-            local runtime_files
-            runtime_files=$(echo "$diff_result" | grep -cE "\.(log|cache|tmp)$" 2>/dev/null || echo 0)
 
             if [[ "$diff_count" -le 10 ]]; then
                 echo -e "${YELLOW}⚠️  $((diff_count/2)) files differ${NC} (likely runtime/log files)"
@@ -424,10 +477,10 @@ verify_integrity() {
 
     if $all_ok; then
         echo ""
-        log_success "Integrity verification passed — no corrupt files!"
+        log_success "Integrity verification passed — no corrupt items!"
     else
         echo ""
-        log_error "Some files may be corrupt. Consider re-transferring."
+        log_error "Some items may be corrupt. Consider re-transferring."
         return 1
     fi
 }
@@ -442,14 +495,20 @@ install_dependencies() {
     echo -e "\n${BOLD}📦 Installing Dependencies on Destination${NC}"
     separator
 
-    for dir in "${DIRS_TO_TRANSFER[@]}"; do
-        local dir_name
-        dir_name=$(basename "$dir")
-        local dest_path="${DEST_BASE_DIR}/${dir_name}"
+    local ran_any=false
 
-        # Check for Node.js project
-        if [[ -f "$dir/package.json" ]]; then
-            echo -ne "  ${CYAN}npm install${NC} ${BOLD}$dir_name${NC}... "
+    for item in "${ITEMS_TO_TRANSFER[@]}"; do
+        # Dependency install only makes sense for project directories.
+        [[ ! -d "$item" ]] && continue
+
+        local item_name dest_path
+        item_name=$(basename "$item")
+        dest_path="${DEST_BASE_DIR}/${item_name}"
+
+        # Node.js project
+        if [[ -f "$item/package.json" ]]; then
+            ran_any=true
+            echo -ne "  ${CYAN}npm install${NC} ${BOLD}$item_name${NC}... "
             local npm_result
             npm_result=$(remote_exec "cd '$dest_path' && npm install 2>&1 | tail -3" 2>&1)
             if [[ $? -eq 0 ]]; then
@@ -462,9 +521,10 @@ install_dependencies() {
             fi
         fi
 
-        # Check for Python project with requirements.txt (only if no venv transferred)
-        if [[ -f "$dir/requirements.txt" && ! -d "$dir/venv" ]]; then
-            echo -ne "  ${CYAN}pip install${NC} ${BOLD}$dir_name${NC}... "
+        # Python project (skip if a venv was transferred along).
+        if [[ -f "$item/requirements.txt" && ! -d "$item/venv" ]]; then
+            ran_any=true
+            echo -ne "  ${CYAN}pip install${NC} ${BOLD}$item_name${NC}... "
             local pip_result
             pip_result=$(remote_exec "cd '$dest_path' && python3 -m pip install -r requirements.txt 2>&1 | tail -3" 2>&1)
             if [[ $? -eq 0 ]]; then
@@ -474,6 +534,10 @@ install_dependencies() {
             fi
         fi
     done
+
+    if ! $ran_any; then
+        log_info "No project directories with package.json or requirements.txt — nothing to install."
+    fi
 }
 
 # ─── Summary ─────────────────────────────────────────────────
@@ -486,13 +550,16 @@ print_summary() {
 
     echo -e "  ${BOLD}Server:${NC}      ${DEST_USER}@${DEST_IP}"
     echo -e "  ${BOLD}Dest Base:${NC}   ${DEST_BASE_DIR}"
-    echo -e "  ${BOLD}Directories:${NC} ${#DIRS_TO_TRANSFER[@]}"
+    echo -e "  ${BOLD}Items:${NC}       ${#ITEMS_TO_TRANSFER[@]}"
     echo ""
 
-    for dir in "${DIRS_TO_TRANSFER[@]}"; do
-        local dir_name
-        dir_name=$(basename "$dir")
-        echo -e "    ✅ $dir → ${DEST_BASE_DIR}/${dir_name}"
+    for item in "${ITEMS_TO_TRANSFER[@]}"; do
+        local item_name kind icon
+        item_name=$(basename "$item")
+        kind=$(item_kind "$item")
+        icon="📂"
+        [[ "$kind" == "file" ]] && icon="📄"
+        echo -e "    ✅ $icon $item → ${DEST_BASE_DIR}/${item_name}"
     done
 
     echo ""
@@ -509,21 +576,24 @@ main() {
     # Step 1: Server details
     prompt_server_details
 
-    # Step 2: Select directories
-    prompt_directories
+    # Step 2: Select items (files and/or directories)
+    prompt_items
 
     # Step 3: Confirmation
     echo -e "\n${BOLD}📋 Transfer Plan${NC}"
     separator
     echo -e "  ${BOLD}From:${NC} $(hostname) (this server)"
     echo -e "  ${BOLD}To:${NC}   ${DEST_USER}@${DEST_IP}:${DEST_BASE_DIR}"
-    echo -e "  ${BOLD}Dirs:${NC} ${#DIRS_TO_TRANSFER[@]}"
-    for dir in "${DIRS_TO_TRANSFER[@]}"; do
-        local size
-        size=$(du -sh "$dir" --exclude='node_modules' 2>/dev/null | cut -f1)
-        echo -e "        📂 $(basename "$dir") ($size)"
+    echo -e "  ${BOLD}Items:${NC} ${#ITEMS_TO_TRANSFER[@]}"
+    for item in "${ITEMS_TO_TRANSFER[@]}"; do
+        local size kind icon
+        size=$(du -sh "$item" --exclude='node_modules' 2>/dev/null | cut -f1)
+        kind=$(item_kind "$item")
+        icon="📂"
+        [[ "$kind" == "file" ]] && icon="📄"
+        echo -e "        $icon $(basename "$item") ($size, $kind)"
     done
-    echo -e "  ${BOLD}Exclude:${NC} ${EXCLUDE_PATTERNS[*]}"
+    echo -e "  ${BOLD}Exclude (dirs only):${NC} ${EXCLUDE_PATTERNS[*]}"
     echo ""
 
     if ! $DRY_RUN; then
@@ -544,8 +614,8 @@ main() {
 
     # Step: Transfer
     ((step++))
-    log_step $step "Transferring Files"
-    transfer_directories
+    log_step $step "Transferring Items"
+    transfer_items
 
     # Step: Verify
     if ! $SKIP_VERIFY; then
